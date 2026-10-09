@@ -1,7 +1,8 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import BaseChart from '../components/BaseChart.vue'
-import AskDialog from '../components/AskDialog.vue'
+import ChatWorkspace from '../components/ChatWorkspace.vue'
+import KnowledgeManageDialog from '../components/KnowledgeManageDialog.vue'
 import {
   fetchGameDetail,
   fetchGameRank,
@@ -25,8 +26,10 @@ const trendPoints = ref([])
 const rankItems = ref([])
 const selectedGame = ref(null)
 const detail = ref(null)
-const askOpen = ref(false)
+const knowledgeOpen = ref(false)
+const chatOpen = ref(false)
 const currentUser = ref(getUser())
+const isAdmin = computed(() => currentUser.value?.role === 'admin')
 
 const ranges = [
   { key: '7', label: '近 7 天' },
@@ -214,7 +217,15 @@ watch([rangeKey, trendMetric, rankMetric], loadAll, { immediate: true })
         <p class="sub">账号租赁 · 核心指标 / 趋势 / 游戏排行</p>
       </div>
       <div class="top-right">
-        <button type="button" class="ask-btn" @click="askOpen = true">智能问数</button>
+        <button type="button" class="ask-btn" @click="chatOpen = true">智能问答</button>
+        <button
+          v-if="isAdmin"
+          type="button"
+          class="kb-btn"
+          @click="knowledgeOpen = true"
+        >
+          知识库管理
+        </button>
         <div class="ranges">
           <button
             v-for="r in ranges"
@@ -340,9 +351,10 @@ watch([rangeKey, trendMetric, rankMetric], loadAll, { immediate: true })
       />
     </section>
 
-    <AskDialog :open="askOpen" @close="askOpen = false" />
+    <ChatWorkspace :open="chatOpen" @close="chatOpen = false" />
+    <KnowledgeManageDialog :open="knowledgeOpen" @close="knowledgeOpen = false" />
 
-    <button type="button" class="fab" title="智能问数" @click="askOpen = true">问</button>
+    <button type="button" class="fab" title="智能问答" @click="chatOpen = true">问</button>
   </div>
 </template>
 
@@ -398,7 +410,8 @@ h1 {
   gap: 10px;
 }
 
-.ask-btn {
+.ask-btn,
+.kb-btn {
   border: 0;
   background: #0f766e;
   color: #fff;
@@ -406,6 +419,10 @@ h1 {
   border-radius: 999px;
   padding: 8px 16px;
   cursor: pointer;
+}
+
+.kb-btn {
+  background: #115e59;
 }
 
 .user-box {

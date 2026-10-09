@@ -125,6 +125,30 @@ export function fetchTask(taskId) {
   return getJson(`/api/v1/agent/tasks/${taskId}`)
 }
 
+export function fetchQueueStatus() {
+  return getJson('/api/v1/agent/queue/status')
+}
+
+export function enqueueSupervisorAsk(sessionId, question, { maxRows = 100, topK = 5 } = {}) {
+  return postJson(`/api/v1/agent/sessions/${sessionId}/ask/async`, {
+    question,
+    max_rows: maxRows,
+    top_k: topK,
+  })
+}
+
+export async function waitForTask(taskId, { intervalMs = 800, timeoutMs = 180000 } = {}) {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    const task = await fetchTask(taskId)
+    if (task.status === 'success' || task.status === 'failed') {
+      return task
+    }
+    await new Promise((r) => setTimeout(r, intervalMs))
+  }
+  throw new Error('任务等待超时')
+}
+
 export function fetchExecutions(taskId) {
   return getJson(`/api/v1/agent/tasks/${taskId}/executions`)
 }

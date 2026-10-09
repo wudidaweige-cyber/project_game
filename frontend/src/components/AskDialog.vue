@@ -1,72 +1,81 @@
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import {
-  askKnowledge,
-  askNl2sql,
   askSupervisor,
   createSession,
+  enqueueSupervisorAsk,
   fetchExecutions,
+  fetchQueueStatus,
+  waitForTask,
 } from '../api/agent'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
+  title: { type: String, default: '智能问答' },
+  offsetIndex: { type: Number, default: 0 },
+  zIndex: { type: Number, default: 60 },
 })
 
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'activate', 'update:title'])
 
-const mode = ref('auto') // auto | data | knowledge
+const WELCOME =
+  '可问运营数据、规则 SOP、异常归因或策略建议，系统自动路由。例如：「最近7天全站GMV是多少？」「什么情况下可以全额退款？」'
+
 const input = ref('')
 const asking = ref(false)
-const messages = ref([])
+const messages = ref([{ role: 'assistant', text: WELCOME }])
 const listEl = ref(null)
 const sessionId = ref('')
-const sessionError = ref('')
+const panelEl = ref(null)
 
-const modeMeta = computed(() => {
-  if (mode.value === 'data') {
-    return {
-      eyebrow: 'NL2SQL',
-      title: '智能问数',
-      hint: '可以问运营数据，例如：「最近7天全站GMV是多少？」',
-      placeholder: '输入数据问题…',
-      typing: '正在生成 SQL 并查询…',
-    }
-  }
-  if (mode.value === 'knowledge') {
-    return {
-      eyebrow: 'RAG',
-      title: '知识问答',
-      hint: '可以问运营规则，例如：「什么情况下可以全额退款？」',
-      placeholder: '输入规则/SOP 问题…',
-      typing: '正在检索知识库并作答…',
-    }
-  }
-  return {
-    eyebrow: 'Supervisor',
-    title: '智能运营助手',
-    hint: '自动路由问数、异常、策略建议或问规则。例如：「根据最近指标给出运营策略建议」',
-    placeholder: '输入问题，自动判断走数据、异常、策略或规则…',
-    typing: 'Supervisor 路由并汇总中…',
-  }
-})
+const pos = ref({ x: 0, y: 0 })
+const dragging = ref(false)
+let dragOrigin = { mx: 0, my: 0, x: 0, y: 0 }
 
-function resetWelcome() {
-  messages.value = [{ role: 'assistant', text: modeMeta.value.hint }]
+const panelStyle = computed(() => ({
+  zIndex: props.zIndex,
+  left: `${pos.value.x}px`,
+  top: `${pos.value.y}px`,
+}))
+
+function placePanel() {
+  const margin = 24
+  const cascade = (props.offsetIndex % 6) * 28
+  const width = Math.min(420, window.innerWidth - margin * 2)
+  const height = Math.min(560, window.innerHeight - margin * 2)
+  pos.value = {
+    x: Math.max(margin, window.innerWidth - width - margin - cascade),
+    y: Math.max(margin, 72 + cascade),
+  }
+  panelEl.value?.style.setProperty('--panel-h', `${height}px`)
 }
 
-resetWelcome()
+onMounted(() => {
+  if (props.open) placePanel()
+})
+
+watch(
+  () => props.open,
+  async (v) => {
+    if (v) {
+      placePanel()
+      scrollBottom()
+      if (!sessionId.value) {
+        try {
+          await ensureSession()
+        } catch {
+          /* shown on send */
+        }
+      }
+    }
+  },
+)
 
 async function ensureSession() {
   if (sessionId.value) return sessionId.value
-  try {
-    const data = await createSession('运营问答')
-    sessionId.value = data.id
-    sessionError.value = ''
-    return sessionId.value
-  } catch (e) {
-    sessionError.value = e.message || String(e)
-    throw e
-  }
+  const data = await createSession(props.title || '运营问答')
+  sessionId.value = data.id
+  return sessionId.value
 }
 
 async function scrollBottom() {
@@ -91,6 +100,13 @@ async function send(text) {
   const q = (text ?? input.value).trim()
   if (!q || asking.value) return
   input.value = ''
+
+  const userCount = messages.value.filter((m) => m.role === 'user').length
+  if (userCount === 0) {
+    const short = q.length > 16 ? `${q.slice(0, 16)}…` : q
+    emit('update:title', short)
+  }
+
   messages.value.push({ role: 'user', text: q })
   const idx =
     messages.value.push({
@@ -120,22 +136,41 @@ async function send(text) {
       if (data.citations) m.citations = data.citations
       if (data.route) m.route = data.route
       if (data.route_decision) m.routeDecision = data.route_decision
-      if (data.phase === 'routed' && data.route) m.route = data.route
     } else if (event === 'phase') {
       m.phase = data.phase
     }
   }
 
   try {
+    const sid = await ensureSession()
+    let useQueue = false
+    try {
+      const qs = await fetchQueueStatus()
+      useQueue = Boolean(qs?.enabled)
+    } catch {
+      useQueue = false
+    }
+
     let data
-    if (mode.value === 'data') {
-      data = await askNl2sql(q, 100, onEvent)
-    } else if (mode.value === 'knowledge') {
-      data = await askKnowledge(q, 5, undefined, onEvent)
+    if (useQueue) {
+      const queued = await enqueueSupervisorAsk(sid, q)
+      if (queued.task_id) msg().taskId = queued.task_id
+      const task = await waitForTask(queued.task_id)
+      data = {
+        answer: task.result_summary || '',
+        task_id: task.id,
+        error: task.error_message || '',
+        route: [],
+      }
+      if (task.status === 'failed') {
+        const err = new Error(task.error_message || '任务失败')
+        err.payload = { data }
+        throw err
+      }
     } else {
-      const sid = await ensureSession()
       data = await askSupervisor(q, { sessionId: sid }, onEvent)
     }
+
     const m = msg()
     m.streaming = false
     m.text = data.answer || m.text || '未返回结论。'
@@ -170,160 +205,160 @@ function onKeydown(e) {
   }
 }
 
-function switchMode(next) {
-  if (mode.value === next) return
-  mode.value = next
-  resetWelcome()
+function onPointerDown(e) {
+  if (e.button !== 0) return
+  emit('activate')
+  dragging.value = true
+  dragOrigin = { mx: e.clientX, my: e.clientY, x: pos.value.x, y: pos.value.y }
+  window.addEventListener('pointermove', onPointerMove)
+  window.addEventListener('pointerup', onPointerUp)
 }
 
-watch(
-  () => props.open,
-  async (v) => {
-    if (v) {
-      scrollBottom()
-      if (mode.value === 'auto' && !sessionId.value) {
-        try {
-          await ensureSession()
-        } catch {
-          /* shown via sessionError when sending */
-        }
-      }
-    }
-  },
-)
+function onPointerMove(e) {
+  if (!dragging.value) return
+  pos.value = {
+    x: Math.max(8, dragOrigin.x + e.clientX - dragOrigin.mx),
+    y: Math.max(8, dragOrigin.y + e.clientY - dragOrigin.my),
+  }
+}
+
+function onPointerUp() {
+  dragging.value = false
+  window.removeEventListener('pointermove', onPointerMove)
+  window.removeEventListener('pointerup', onPointerUp)
+}
 </script>
 
 <template>
   <Teleport to="body">
-    <div v-if="open" class="mask" @click.self="emit('close')">
-      <aside class="dialog" role="dialog" :aria-label="modeMeta.title">
-        <header class="dlg-head">
-          <div>
-            <p class="eyebrow">{{ modeMeta.eyebrow }}</p>
-            <h2>{{ modeMeta.title }}</h2>
-          </div>
-          <button type="button" class="icon-btn" @click="emit('close')">关闭</button>
-        </header>
-
-        <div class="modes">
-          <button type="button" :class="{ active: mode === 'auto' }" @click="switchMode('auto')">
-            智能
-          </button>
-          <button type="button" :class="{ active: mode === 'data' }" @click="switchMode('data')">
-            问数
-          </button>
-          <button
-            type="button"
-            :class="{ active: mode === 'knowledge' }"
-            @click="switchMode('knowledge')"
-          >
-            问规则
-          </button>
+    <aside
+      v-if="open"
+      ref="panelEl"
+      class="panel"
+      :class="{ dragging }"
+      :style="panelStyle"
+      role="dialog"
+      :aria-label="title"
+      @mousedown="emit('activate')"
+    >
+      <header class="dlg-head" @pointerdown="onPointerDown">
+        <div class="titles">
+          <p class="eyebrow">Supervisor · 统一问答</p>
+          <h2>{{ title }}</h2>
         </div>
-
-        <div ref="listEl" class="msgs">
-          <div
-            v-for="(m, i) in messages"
-            :key="i"
-            class="msg"
-            :class="[m.role, { err: m.error }]"
-          >
-            <p class="bubble">{{ m.text }}</p>
-            <p v-if="m.suggestionsOnly" class="route suggest-hint">仅输出建议，不会自动修改业务数据</p>
-            <p v-if="m.route?.length" class="route">路由：{{ m.route.join(' → ') }}</p>
-            <p v-if="m.taskId" class="route">任务：{{ m.taskId }}</p>
-            <details
-              v-if="m.taskId"
-              class="meta"
-              @toggle="(e) => e.target.open && loadExecutions(m)"
-            >
-              <summary>查看执行步骤</summary>
-              <p v-if="m.loadingSteps" class="steps-hint">加载中…</p>
-              <p v-else-if="m.stepsError" class="steps-hint">{{ m.stepsError }}</p>
-              <ul v-else-if="m.executions?.length" class="steps">
-                <li v-for="ex in m.executions" :key="ex.id">
-                  <strong>{{ ex.step_no }}. {{ ex.agent_name }}</strong>
-                  <span class="tag">{{ ex.status }}</span>
-                  <span v-if="ex.tool_name" class="tag">{{ ex.tool_name }}</span>
-                  <p>{{ ex.output_summary }}</p>
-                </li>
-              </ul>
-              <p v-else class="steps-hint">暂无步骤</p>
-            </details>
-            <details v-if="m.sql" class="meta">
-              <summary>查看 SQL{{ m.rowCount != null ? ` · ${m.rowCount} 行` : '' }}</summary>
-              <pre>{{ m.sql }}</pre>
-            </details>
-            <details v-if="m.citations?.length" class="meta">
-              <summary>查看来源 · {{ m.citations.length }} 条</summary>
-              <ul class="cites">
-                <li v-for="c in m.citations" :key="c.chunk_id || c.index">
-                  <strong>[{{ c.index }}] {{ c.title }}</strong>
-                  <span class="tag">{{ c.doc_type }}</span>
-                  <p>{{ c.snippet }}</p>
-                </li>
-              </ul>
-            </details>
-          </div>
-          <p v-if="asking" class="typing">
-            {{
-              messages.at(-1)?.text
-                ? '生成中…'
-                : modeMeta.typing
-            }}
-          </p>
+        <div class="head-actions">
+          <button type="button" class="icon-btn" title="关闭" @click.stop="emit('close')">关闭</button>
         </div>
+      </header>
 
-        <footer class="composer">
-          <textarea
-            v-model="input"
-            rows="2"
-            :placeholder="modeMeta.placeholder"
-            :disabled="asking"
-            @keydown="onKeydown"
-          />
-          <button type="button" class="send" :disabled="asking || !input.trim()" @click="send()">
-            发送
-          </button>
-        </footer>
-      </aside>
-    </div>
+      <p class="hint-bar">问数 / 问规则 / 异常 / 策略 · 同一窗口自动路由</p>
+
+      <div ref="listEl" class="msgs">
+        <div
+          v-for="(m, i) in messages"
+          :key="i"
+          class="msg"
+          :class="[m.role, { err: m.error }]"
+        >
+          <p class="bubble">{{ m.text }}</p>
+          <p v-if="m.suggestionsOnly" class="route suggest-hint">仅输出建议，不会自动修改业务数据</p>
+          <p v-if="m.route?.length" class="route">路由：{{ m.route.join(' → ') }}</p>
+          <p v-if="m.taskId" class="route">任务：{{ m.taskId }}</p>
+          <details
+            v-if="m.taskId"
+            class="meta"
+            @toggle="(e) => e.target.open && loadExecutions(m)"
+          >
+            <summary>查看执行步骤</summary>
+            <p v-if="m.loadingSteps" class="steps-hint">加载中…</p>
+            <p v-else-if="m.stepsError" class="steps-hint">{{ m.stepsError }}</p>
+            <ul v-else-if="m.executions?.length" class="steps">
+              <li v-for="ex in m.executions" :key="ex.id">
+                <strong>{{ ex.step_no }}. {{ ex.agent_name }}</strong>
+                <span class="tag">{{ ex.status }}</span>
+                <span v-if="ex.tool_name" class="tag">{{ ex.tool_name }}</span>
+                <p>{{ ex.output_summary }}</p>
+              </li>
+            </ul>
+            <p v-else class="steps-hint">暂无步骤</p>
+          </details>
+          <details v-if="m.sql" class="meta">
+            <summary>查看 SQL{{ m.rowCount != null ? ` · ${m.rowCount} 行` : '' }}</summary>
+            <pre>{{ m.sql }}</pre>
+          </details>
+          <details v-if="m.citations?.length" class="meta">
+            <summary>查看来源 · {{ m.citations.length }} 条</summary>
+            <ul class="cites">
+              <li v-for="c in m.citations" :key="c.chunk_id || c.index">
+                <strong>[{{ c.index }}] {{ c.title }}</strong>
+                <span class="tag">{{ c.doc_type }}</span>
+                <p>{{ c.snippet }}</p>
+              </li>
+            </ul>
+          </details>
+        </div>
+        <p v-if="asking" class="typing">
+          {{ messages.at(-1)?.text ? '生成中…' : '任务执行中…' }}
+        </p>
+      </div>
+
+      <footer class="composer">
+        <textarea
+          v-model="input"
+          rows="2"
+          placeholder="输入问题：数据、规则、异常或策略…"
+          :disabled="asking"
+          @keydown="onKeydown"
+          @focus="emit('activate')"
+        />
+        <button type="button" class="send" :disabled="asking || !input.trim()" @click="send()">
+          发送
+        </button>
+      </footer>
+    </aside>
   </Teleport>
 </template>
 
 <style scoped>
-.mask {
+.panel {
+  --panel-h: 560px;
   position: fixed;
-  inset: 0;
-  background: rgba(15, 23, 42, 0.35);
-  display: flex;
-  justify-content: flex-end;
-  z-index: 50;
-}
-
-.dialog {
-  width: min(440px, 100%);
-  height: 100%;
+  width: min(420px, calc(100vw - 32px));
+  height: var(--panel-h);
+  max-height: calc(100vh - 32px);
   background: #f7faf8;
-  border-left: 1px solid #dbe4df;
+  border: 1px solid #dbe4df;
+  border-radius: 16px;
   display: flex;
   flex-direction: column;
-  box-shadow: -12px 0 40px rgba(15, 23, 42, 0.12);
+  box-shadow: 0 18px 50px rgba(15, 23, 42, 0.18);
+  overflow: hidden;
+}
+
+.panel.dragging {
+  user-select: none;
+  cursor: grabbing;
 }
 
 .dlg-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 18px 18px 12px;
+  padding: 14px 14px 10px;
   border-bottom: 1px solid #dbe4df;
   background: #fff;
+  cursor: grab;
+  touch-action: none;
+}
+
+.titles {
+  min-width: 0;
 }
 
 .eyebrow {
   margin: 0;
   font-size: 11px;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   color: #0f766e;
   font-weight: 700;
@@ -331,7 +366,11 @@ watch(
 
 h2 {
   margin: 2px 0 0;
-  font-size: 18px;
+  font-size: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
 }
 
 .icon-btn {
@@ -342,35 +381,19 @@ h2 {
   cursor: pointer;
 }
 
-.modes {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-  padding: 10px 16px;
-  background: #fff;
-  border-bottom: 1px solid #dbe4df;
-}
-
-.modes button {
-  border: 1px solid #dbe4df;
-  background: #f8fafc;
-  border-radius: 999px;
-  padding: 8px 10px;
-  cursor: pointer;
+.hint-bar {
+  margin: 0;
+  padding: 8px 14px;
+  font-size: 12px;
   color: #64748b;
-}
-
-.modes button.active {
-  background: #ccfbf1;
-  border-color: #99f6e4;
-  color: #0f766e;
-  font-weight: 600;
+  background: #ecfdf5;
+  border-bottom: 1px solid #ccfbf1;
 }
 
 .msgs {
   flex: 1;
   overflow: auto;
-  padding: 16px;
+  padding: 14px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -498,7 +521,7 @@ h2 {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 8px;
-  padding: 12px 16px 16px;
+  padding: 12px 14px 14px;
   border-top: 1px solid #dbe4df;
   background: #fff;
 }

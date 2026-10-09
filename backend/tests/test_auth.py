@@ -66,17 +66,20 @@ def test_ingest_forbidden_for_operator(auth_headers):
     assert resp.json()["code"] == 403
 
 
-def test_ingest_allowed_for_admin():
+def test_ingest_allowed_for_admin(monkeypatch):
     ensure_demo_users()
     login = client.post(
         "/api/v1/auth/login",
         json={"username": "admin", "password": "Admin@123"},
     ).json()
     token = login["data"]["access_token"]
-    # Do not actually re-ingest vectors in CI-like run if heavy; just assert not 403.
-    # Calling ingest may be slow; skip body check if LLM/embedding unavailable.
+    monkeypatch.setattr(
+        "app.api.v1.knowledge_api.ingest_knowledge_dir",
+        lambda reset_vectors=False: {"ok": True, "doc_count": 0, "chunk_count": 0},
+    )
     resp = client.post(
         "/api/v1/knowledge/ingest",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code != 403
+    assert resp.json()["code"] == 200

@@ -39,11 +39,13 @@ class Settings(BaseSettings):
     rag_hybrid_enabled: bool = True
     rag_candidate_k: int = 20
     rag_rrf_k: int = 60
-    rag_rerank_enabled: bool = False
+    rag_rerank_enabled: bool = True
     rag_rerank_top_n: int = 10
     rerank_base_url: str | None = None
     rerank_api_key: str | None = None
     rerank_model: str = ""
+
+    redis_url: str = ""
 
     # 本机可用本地文件（Milvus Lite）；也可填 http://127.0.0.1:19530
     milvus_uri: str = ""

@@ -16,6 +16,7 @@ from app.agent.strategy import analyze_strategy, analyze_strategy_stream
 from app.agent.supervisor import run_supervisor, run_supervisor_stream
 from app.core.deps import AuthUser, get_current_user
 from app.core.response import fail, ok
+from app.queue.jobs import QueueError, enqueue_job, ping_queue
 from app.services import ai_trace
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -98,21 +99,32 @@ def _supervisor_response_payload(
     }
 
 
-def _persist_supervisor_result(
+def persist_supervisor_result(
     *,
     session_id: str,
     question: str,
     result: dict[str, Any],
+    task_id: str | None = None,
 ) -> dict[str, Any]:
-    """Create task + executions from a finished supervisor result. Returns API payload."""
+    """Create (or reuse) task + executions from a finished supervisor result."""
     decision = str(result.get("route_decision") or "")
-    task = ai_trace.create_task(
-        session_id=session_id,
-        question=question,
-        task_type=_map_task_type(decision),
-    )
-    task_id = task["id"]
-    ai_trace.mark_task_running(task_id)
+    if task_id:
+        try:
+            ai_trace.update_task_type(task_id, _map_task_type(decision))
+        except ValueError:
+            pass
+        try:
+            ai_trace.mark_task_running(task_id)
+        except ValueError:
+            pass
+    else:
+        task = ai_trace.create_task(
+            session_id=session_id,
+            question=question,
+            task_type=_map_task_type(decision),
+        )
+        task_id = task["id"]
+        ai_trace.mark_task_running(task_id)
 
     route = list(result.get("route") or [])
     step = 0
@@ -435,6 +447,56 @@ def get_session(
     return ok(data)
 
 
+@router.get("/queue/status")
+def get_queue_status(
+    user: Annotated[AuthUser, Depends(get_current_user)],
+) -> dict:
+    _ = user
+    info = ping_queue()
+    return ok({"enabled": True, **info})
+
+
+@router.post("/sessions/{session_id}/ask/async")
+def post_session_ask_async(
+    session_id: str,
+    body: SupervisorAskRequest,
+    user: Annotated[AuthUser, Depends(get_current_user)],
+) -> dict:
+    _ = user
+    if not ai_trace.get_session(session_id):
+        return fail(404, "session not found")
+    task = ai_trace.create_task(
+        session_id=session_id,
+        question=body.question,
+        task_type="mixed",
+    )
+    job = {
+        "task_id": task["id"],
+        "session_id": session_id,
+        "question": body.question,
+        "max_rows": body.max_rows,
+        "top_k": body.top_k,
+    }
+    try:
+        enqueue_job(job)
+    except QueueError as exc:
+        ai_trace.finish_task(
+            task_id=task["id"],
+            status="failed",
+            error_message=str(exc),
+        )
+        return fail(503, str(exc), {"task_id": task["id"]})
+    return ok(
+        {
+            "session_id": session_id,
+            "task_id": task["id"],
+            "status": "pending",
+            "queued": True,
+            "question": body.question,
+        }
+    )
+
+
 @router.get("/tasks/{task_id}")
 def get_task(
     task_id: str,
@@ -473,7 +535,7 @@ def post_session_ask(
         max_rows=body.max_rows,
         top_k=body.top_k,
     )
-    payload = _persist_supervisor_result(
+    payload = persist_supervisor_result(
         session_id=session_id,
         question=body.question,
         result=result,
@@ -640,7 +702,7 @@ def post_supervisor_ask(
         max_rows=body.max_rows,
         top_k=body.top_k,
     )
-    payload = _persist_supervisor_result(
+    payload = persist_supervisor_result(
         session_id=session["id"],
         question=body.question,
         result=result,

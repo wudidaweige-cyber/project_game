@@ -14,6 +14,8 @@
 | [docs/03-前期准备清单.md](docs/03-前期准备清单.md) | 开工前环境、密钥、口径、素材与 Demo 检查清单 |
 | [docs/04-系统设计.md](docs/04-系统设计.md) | 系统架构、数据库设计、接口设计 |
 | [docs/05-后续工作规划.md](docs/05-后续工作规划.md) | 进度盘点与分阶段后续规划 |
+| [docs/06-系统使用手册.md](docs/06-系统使用手册.md) | 登录、看板、智能问答与运维操作说明 |
+| [docs/07-系统架构与技术实现.md](docs/07-系统架构与技术实现.md) | 整体架构图、技术栈、功能与实现方式 |
 | [CLAUDE.md](CLAUDE.md) | AI Coding Agent 协作规范 |
 | [开发日志-2026-09-22.md](开发日志-2026-09-22.md) | 2026-09-22 任务与完成情况 |
 | [开发日志-2026-09-23.md](开发日志-2026-09-23.md) | 2026-09-23 任务与完成情况 |
@@ -23,10 +25,9 @@
 ```text
 game/
 ├── .env / .env.example
-├── backend/              # FastAPI（已落地骨架）
-│   ├── app/
-│   └── tests/
-├── frontend/             # Vue + Vite（已落地骨架）
+├── backend/              # FastAPI
+├── frontend/             # Vue + Vite
+├── docker/               # 档 A：Milvus（可选 PostgreSQL）Compose，应用不进镜像
 ├── docs/
 ├── CLAUDE.md
 └── readme.md
@@ -96,7 +97,9 @@ npm run dev
 - [x] NL2SQL Agent：`POST /api/v1/agent/nl2sql`（生成 → 结构自检/安全校验 → 失败重试 1 次 → MCP 执行 → 结论）
 - [x] 模拟知识库原文：`data/knowledge/*.md`
 - [x] RAG 向量化入库：切分 + Embedding + Milvus Lite + PG 切片表
-- [x] RAG Hybrid：向量 + BM25 + RRF；可选 Rerank（`RAG_RERANK_ENABLED`）
+- [x] RAG Hybrid：向量 + BM25 + RRF；Rerank 默认可开（`RAG_RERANK_ENABLED`）
+- [x] Agent 异步任务队列：`POST /agent/sessions/{id}/ask/async`（Redis 或进程内队列）
+- [x] 知识库前台管理（admin）：单篇 `.md` 上传入库、列表/详情/删除
 - [x] 知识问答 Agent：`POST /api/v1/agent/knowledge`（检索 →  grounded 作答 / 无命中不编造）
 - [x] Supervisor：`POST /api/v1/agent/ask`（LangGraph 路由 data/knowledge/both/anomaly/strategy → 汇总）
 - [x] AI 会话/任务落库：`sessions` + `tasks` + `executions`；提问/流式可回看
@@ -128,7 +131,7 @@ GET  /api/v1/agent/tasks/{task_id}
 GET  /api/v1/agent/tasks/{task_id}/executions
 ```
 
-前端「智能」模式打开对话框时自动建会话；回答可展开「查看执行步骤」。
+前端微信式「智能问答」（左侧会话列表 + 右侧聊天，Supervisor 自动路由）；回答可展开执行步骤。
 
 ### 异常分析
 
@@ -233,6 +236,8 @@ cd backend
 cd backend
 .\.venv\Scripts\python -m scripts.init_db --drop
 .\.venv\Scripts\python -m scripts.seed_demo
+# 仅补近日数据（不删旧数据，默认从最大日期次日补到今天）
+.\.venv\Scripts\python -m scripts.seed_recent
 ```
 
 看板接口示例：
@@ -243,12 +248,22 @@ GET /api/v1/dashboard/trends?metric=gmv&start_date=2026-09-01&end_date=2026-09-2
 GET /api/v1/dashboard/game-rank?metric=gmv&start_date=2026-09-01&end_date=2026-09-22&limit=5
 ```
 
+### Docker 基础设施（档 A）
+
+应用仍在本机运行。虚拟机上启动 Milvus（可选 PostgreSQL）见 [docker/README.md](docker/README.md)。
+
+```bash
+cd docker
+docker compose up -d
+```
+
+Windows `.env` 填写 `MILVUS_URI=http://<虚拟机IP>:19530`，然后 `python -m scripts.ingest_knowledge --reset`。
+
 ## 下一步
 
 详见 [docs/05-后续工作规划.md](docs/05-后续工作规划.md)。
 
-当前建议优先：**Phase D 策略分析 Agent** → 检索/SQL 质量 → LangSmith / Redis / Docker 后置。  
-Phase A～C（会话落库、登录鉴权、异常分析）已完成。
+档 A（依赖 Compose）已提供编排文件。可选后续：档 B 应用镜像 + Nginx；LangSmith / Redis。
 
 ## 贡献约定
 

@@ -165,9 +165,13 @@ def search_knowledge(
     enriched = _enrich(ordered_ids, score_by_id, by_id, doc_by_id)
     enriched = _filter_by_overlap(q, enriched)
 
-    if getattr(settings, "rag_rerank_enabled", False) and enriched:
+    reranked = False
+    if getattr(settings, "rag_rerank_enabled", True) and enriched:
+        before = [h.get("chunk_id") for h in enriched]
         rerank_n = int(getattr(settings, "rag_rerank_top_n", 10) or 10)
         enriched = rerank_hits(q, enriched, top_n=max(top_k, rerank_n))
+        after = [h.get("chunk_id") for h in enriched]
+        reranked = before != after or any(h.get("rerank_score") is not None for h in enriched)
 
     hits = enriched[:top_k]
     if not hits:
@@ -186,4 +190,5 @@ def search_knowledge(
         "mode": resolved_mode,
         "dense_count": len(dense_hits),
         "sparse_count": len(sparse_hits),
+        "reranked": reranked,
     }
